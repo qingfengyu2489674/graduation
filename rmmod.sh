@@ -1,0 +1,1 @@
+sudo rmmod nvme_read_write.ko

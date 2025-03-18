@@ -1,0 +1,1 @@
+sudo insmod nvme_read_write.ko
