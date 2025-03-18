@@ -15,6 +15,8 @@ OBJ = $(SRC:.c=.o)
 
 # 默认目标
 all: $(TARGET)
+	# 删除中间的编译文件 (.o)
+	rm -f $(OBJ)
 
 # 编译规则
 $(TARGET): $(OBJ)
