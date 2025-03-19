@@ -1,0 +1,1 @@
+sudo rmmod bio_rw_char_dev.ko
