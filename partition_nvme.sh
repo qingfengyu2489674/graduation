@@ -30,3 +30,9 @@ partprobe "$DISK"
 echo "分区已创建："
 echo "第一个分区：${DISK}p1 (${PART1_SIZE_MB}MB)"
 echo "第二个分区：${DISK}p2 (剩余空间)"
+
+sudo chmod 666 /dev/nvme0n1p1
+sudo chmod 666 /dev/nvme0n1p2
+
+echo "已经赋予两个分区读写权限"
+

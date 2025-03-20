@@ -10,7 +10,7 @@
 #include <linux/cdev.h>
 #include <linux/device.h>
 
-#define DEVICE_NAME "/dev/nvme0n1" // 需要操作的设备
+#define DEVICE_NAME "/dev/nvme0n1p1" // 需要操作的设备
 #define CHAR_DEV_NAME "bio_rw_char_dev"
 
 static dev_t dev_num;
