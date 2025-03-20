@@ -1,76 +1,94 @@
 #include <stdio.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <errno.h>
 
-#define DEVICE_PATH "/dev/bio_rw_char_dev"  // 替换为实际的块设备路径
-#define SECTOR_SIZE 512                      // 每个扇区的大小
-#define SECTOR_COUNT 1                       // 读取/写入的扇区数
+/* 与内核中的定义保持一致 */
+#define CHAR_DEV "/dev/bio_rw_char_dev"   // 我们在驱动中创建的字符设备
+#define SECTOR_SIZE 512
 
-// 数据填充和验证函数
-void fill_buffer_with_data(char *buffer) {
-    // 填充数据为 0x55，例如每个字节都设置为 0x55
-    memset(buffer, 0x45, SECTOR_SIZE);
+/* 与驱动里定义一致的 ioctl 命令 */
+#define IOCTL_READ_SECOND  _IOR('b', 2, char*)
+#define IOCTL_WRITE_SECOND _IOW('b', 3, char*)
+
+static void print_hex(const char *prefix, const unsigned char *buf, size_t len) {
+    printf("%s (len=%zu):\n", prefix, len);
+    for (size_t i = 0; i < len; i++) {
+        if (i % 16 == 0) printf("%04zu : ", i);
+        printf("%02X ", buf[i]);
+        if ((i + 1) % 16 == 0) printf("\n");
+    }
+    if (len % 16 != 0) printf("\n");
 }
 
-int main() {
+int main()
+{
     int fd;
-    char write_buf[SECTOR_SIZE];  // 写入设备的数据缓冲区
-    char read_buf[SECTOR_SIZE];   // 从设备读取的数据缓冲区
-    ssize_t bytes_written, bytes_read;
+    ssize_t ret;
+    unsigned char buffer[SECTOR_SIZE];
 
-    // 填充写入的数据
-    fill_buffer_with_data(write_buf);
-
-    // 打开设备文件
-    fd = open(DEVICE_PATH, O_RDWR);
-    if (fd == -1) {
-        perror("Failed to open the device");
+    /* 打开我们字符设备驱动 */
+    fd = open(CHAR_DEV, O_RDWR);
+    if (fd < 0) {
+        perror("open char dev");
         return 1;
     }
+    printf("Opened char device: %s\n", CHAR_DEV);
 
-    // 写入数据到设备（按扇区为单位）
-    bytes_written = write(fd, write_buf, SECTOR_SIZE);
-    if (bytes_written == -1) {
-        perror("Failed to write to the device");
-        close(fd);
-        return 1;
-    }
-    printf("Wrote %zd bytes to the device\n", bytes_written);
+    /*--------------------------------------------------------------
+     *  1) 测试对默认块设备 (/dev/nvme0n1p1) 的写操作
+     *--------------------------------------------------------------*/
+    memset(buffer, 0x66, SECTOR_SIZE);  // 用 0x66 填充缓冲区
+    print_hex("Write default device buffer", buffer, 32);
 
-    // 读取数据从设备（按扇区为单位）
-    bytes_read = read(fd, read_buf, SECTOR_SIZE);
-    if (bytes_read == -1) {
-        perror("Failed to read from the device");
-        close(fd);
-        return 1;
-    }
-    printf("Read %zd bytes from the device\n", bytes_read);
-
-    // 打印写入的数据
-    printf("Write buffer (hex): ");
-    for (int i = 0; i < SECTOR_SIZE; i++) {
-        printf("%02x ", (unsigned char)write_buf[i]);
-    }
-    printf("\n");
-
-    // 打印读取的数据
-    printf("Read buffer (hex): ");
-    for (int i = 0; i < SECTOR_SIZE; i++) {
-        printf("%02x ", (unsigned char)read_buf[i]);
-    }
-    printf("\n");
-
-    // 验证读写结果是否正确
-    if (memcmp(write_buf, read_buf, SECTOR_SIZE) == 0) {
-        printf("Read data matches written data: Test PASSED\n");
+    ret = write(fd, buffer, SECTOR_SIZE);  // 写入默认设备
+    if (ret < 0) {
+        perror("write default device");
     } else {
-        printf("Read data does not match written data: Test FAILED\n");
+        printf("Wrote %zd bytes to the default device.\n", ret);
     }
 
-    // 关闭设备文件
-    close(fd);
+    /*--------------------------------------------------------------
+     *  2) 测试对默认块设备 (/dev/nvme0n1p1) 的读操作
+     *--------------------------------------------------------------*/
+    memset(buffer, 0, SECTOR_SIZE);
+    ret = read(fd, buffer, SECTOR_SIZE);   // 从默认设备读取
+    if (ret < 0) {
+        perror("read default device");
+    } else {
+        printf("Read %zd bytes from the default device.\n", ret);
+        print_hex("Read default device buffer", buffer, 32);
+    }
 
+    /*--------------------------------------------------------------
+     *  3) 测试对第二个块设备 (/dev/nvme0n1p2) 的写操作，通过 ioctl
+     *--------------------------------------------------------------*/
+    memset(buffer, 0x77, SECTOR_SIZE);  // 用 0x77 填充缓冲区
+    print_hex("Write second device buffer", buffer, 32);
+
+    ret = ioctl(fd, IOCTL_WRITE_SECOND, buffer);
+    if (ret < 0) {
+        perror("ioctl write second device");
+    } else {
+        printf("IOCTL write second device success.\n");
+    }
+
+    /*--------------------------------------------------------------
+     *  4) 测试对第二个块设备 (/dev/nvme0n1p2) 的读操作，通过 ioctl
+     *--------------------------------------------------------------*/
+    memset(buffer, 0, SECTOR_SIZE);
+    ret = ioctl(fd, IOCTL_READ_SECOND, buffer);
+    if (ret < 0) {
+        perror("ioctl read second device");
+    } else {
+        printf("IOCTL read second device success.\n");
+        print_hex("Read second device buffer", buffer, 32);
+    }
+
+    /* 关闭字符设备 */
+    close(fd);
     return 0;
 }
