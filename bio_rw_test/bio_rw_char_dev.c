@@ -10,6 +10,8 @@
 #include <linux/cdev.h>
 #include <linux/device.h>
 #include <linux/ioctl.h>
+#include <linux/slab.h>
+#include <linux/completion.h>
 
 //---------------------- 配置部分 ----------------------//
 #define CHAR_DEV_NAME "bio_rw_char_dev"
@@ -35,47 +37,141 @@ static dev_t dev_num;
 static struct cdev char_dev;
 static struct class *dev_class;
 
-// ----- 默认设备相关变量 -----
-static struct block_device *bdev_def;   // 默认设备引用
-static struct page *page_def;           // 默认设备使用的 page
-static char *buffer_def;                // 指向 page_def 映射后的地址
+// ----- 两块设备相关指针 -----
+// 默认设备（给 read/write 使用）
+static struct block_device *bdev_def = NULL;
+static struct page *page_def = NULL;
 
-// 完成回调
-static void bio_end_io(struct bio *bio)
+// 第二设备（给 ioctl 使用）
+static struct block_device *bdev_second = NULL;
+static struct page *page_second = NULL;
+
+/**
+ * 小结构，用来在提交 BIO 以后等待其完成。
+ * 每次提交一个 BIO，就分配一个 my_bio_info，在 bio_end_io 回调里 complete()，等待方 wait_for_completion()。
+ */
+struct my_bio_info {
+    struct completion done;
+    // 如果还需存放出错信息或别的，可以放在这里
+};
+
+/**
+ * 自定义的 BIO 完成回调
+ */
+static void my_bio_end_io(struct bio *bio)
 {
+    struct my_bio_info *info = bio->bi_private;
+
     printk(KERN_INFO "[bio_rw_char_dev] BIO operation completed\n");
-    bio_put(bio); // 必须释放 bio
+
+    // 通知等待者，这个 BIO 已经完成
+    complete(&info->done);
+
+    // bio_put 释放掉 BIO 结构
+    bio_put(bio);
+}
+
+/**
+ * @brief 同步提交一个 bio
+ * 
+ * 1. 分配 my_bio_info 并 init_completion()
+ * 2. 设置 bio->bi_private = info，bio->bi_end_io = my_bio_end_io
+ * 3. submit_bio()
+ * 4. wait_for_completion(&info->done)
+ * 5. kfree(info)
+ * 
+ * 这样就能保证在函数返回前，BIO 已经真正完成了。
+ */
+static void submit_bio_sync(struct bio *bio)
+{
+    struct my_bio_info *info = kzalloc(sizeof(*info), GFP_KERNEL);
+
+    if (!info) {
+        // 如果分配失败，实际上没法安全提交 BIO
+        // 这里简单处理：不提交就返回了。
+        printk(KERN_ERR "[bio_rw_char_dev] alloc my_bio_info failed\n");
+        bio_put(bio);
+        return;
+    }
+
+    init_completion(&info->done);
+    bio->bi_private = info;
+    bio->bi_end_io  = my_bio_end_io;
+
+    submit_bio(bio);
+    // 等待 BIO 完成回调
+    wait_for_completion(&info->done);
+
+    // 回调里已经 bio_put(bio) 了
+    kfree(info);
 }
 
 //---------------------- 设备1操作：open/read/write/release ----------------------//
 
-// 打开默认设备
+// 打开时，同时打开两块设备
 static int bio_rw_open(struct inode *inode, struct file *file)
 {
-    printk(KERN_INFO "[bio_rw_char_dev] open() called -> default device: %s\n", DEFAULT_DEVICE);
+    int ret = 0;
 
-    // 获取块设备
+    printk(KERN_INFO "[bio_rw_char_dev] open() called\n");
+    printk(KERN_INFO "  => default device: %s\n", DEFAULT_DEVICE);
+    printk(KERN_INFO "  => second device:  %s\n", SECOND_DEVICE);
+
+    // (1) 打开默认设备
     bdev_def = blkdev_get_by_path(DEFAULT_DEVICE, FMODE_READ | FMODE_WRITE, NULL);
     if (IS_ERR(bdev_def)) {
         printk(KERN_ERR "[bio_rw_char_dev] Failed to open block device: %s\n", DEFAULT_DEVICE);
-        return PTR_ERR(bdev_def);
+        ret = PTR_ERR(bdev_def);
+        bdev_def = NULL;
+        goto fail_open;
     }
 
-    // 分配一个 page
+    // (2) 打开第二个设备
+    bdev_second = blkdev_get_by_path(SECOND_DEVICE, FMODE_READ | FMODE_WRITE, NULL);
+    if (IS_ERR(bdev_second)) {
+        printk(KERN_ERR "[bio_rw_char_dev] Failed to open block device: %s\n", SECOND_DEVICE);
+        ret = PTR_ERR(bdev_second);
+        bdev_second = NULL;
+        goto fail_open_second;
+    }
+
+    // (3) 分配 page 给默认设备
     page_def = alloc_page(GFP_KERNEL);
     if (!page_def) {
-        printk(KERN_ERR "[bio_rw_char_dev] Failed to allocate page\n");
-        blkdev_put(bdev_def, FMODE_READ | FMODE_WRITE);
-        return -ENOMEM;
+        printk(KERN_ERR "[bio_rw_char_dev] Failed to allocate page for default device\n");
+        ret = -ENOMEM;
+        goto fail_page_def;
     }
 
+    // (4) 分配 page 给第二个设备
+    page_second = alloc_page(GFP_KERNEL);
+    if (!page_second) {
+        printk(KERN_ERR "[bio_rw_char_dev] Failed to allocate page for second device\n");
+        ret = -ENOMEM;
+        goto fail_page_second;
+    }
+
+    printk(KERN_INFO "[bio_rw_char_dev] open() success\n");
     return 0;
+
+fail_page_second:
+    __free_page(page_def);
+    page_def = NULL;
+fail_page_def:
+    blkdev_put(bdev_second, FMODE_READ | FMODE_WRITE);
+    bdev_second = NULL;
+fail_open_second:
+    blkdev_put(bdev_def, FMODE_READ | FMODE_WRITE);
+    bdev_def = NULL;
+fail_open:
+    return ret;
 }
 
 // 从默认设备读
 static ssize_t bio_rw_read(struct file *file, char __user *buf, size_t len, loff_t *offset)
 {
     struct bio *bio;
+    char *kbuf;
     unsigned int i;
 
     if (!bdev_def || !page_def) {
@@ -90,31 +186,32 @@ static ssize_t bio_rw_read(struct file *file, char __user *buf, size_t len, loff
         return -ENOMEM;
     }
 
-    bio->bi_bdev  = bdev_def;
-    bio->bi_end_io = bio_end_io;
+    // 设置 BIO
     bio_set_dev(bio, bdev_def);
+    bio->bi_bdev  = bdev_def;
     bio->bi_opf   = REQ_OP_READ;
 
-    // 加入一个 page
+    // 将 page_def 加入到 bio
     bio_add_page(bio, page_def, SECTOR_SIZE, 0);
 
-    // 提交读取
-    submit_bio(bio);
+    // 使用同步函数提交 BIO，并等待完成
+    submit_bio_sync(bio);
 
-    // 读完之后，将 page 映射到内核地址空间
-    buffer_def = kmap(page_def);
+    // 读操作完成后，再映射内核地址读取内容
+    kbuf = kmap(page_def);
 
-    printk(KERN_INFO "[bio_rw_char_dev] Data read from default device (%s): ", DEFAULT_DEVICE);
-    for (i = 0; i < SECTOR_SIZE; i++) {
-        printk(KERN_CONT "%02x ", (unsigned char)buffer_def[i]);
+    // 打印读取到的数据（仅演示）
+    printk(KERN_INFO "[bio_rw_char_dev] Data read from default device: ");
+    for (i = 0; i < 16; i++) {
+        printk(KERN_CONT "%02x ", (unsigned char)kbuf[i]);
     }
-    printk(KERN_CONT "\n");
+    printk(KERN_CONT "... (showing first 16 bytes)\n");
 
     // 将数据拷贝到用户空间
     if (len > SECTOR_SIZE)
         len = SECTOR_SIZE;
 
-    if (copy_to_user(buf, buffer_def, len)) {
+    if (copy_to_user(buf, kbuf, len)) {
         kunmap(page_def);
         return -EFAULT;
     }
@@ -127,28 +224,27 @@ static ssize_t bio_rw_read(struct file *file, char __user *buf, size_t len, loff
 static ssize_t bio_rw_write(struct file *file, const char __user *buf, size_t len, loff_t *offset)
 {
     struct bio *bio;
+    char *kbuf;
 
     if (!bdev_def || !page_def) {
         printk(KERN_ERR "[bio_rw_char_dev] No default device or page\n");
         return -ENODEV;
     }
 
-    // 映射 page
-    buffer_def = kmap(page_def);
-
-    // 把用户空间的数据拷贝到内核
     if (len > SECTOR_SIZE)
         len = SECTOR_SIZE;
 
-    if (copy_from_user(buffer_def, buf, len)) {
+    // 映射 page_def
+    kbuf = kmap(page_def);
+
+    // 把用户空间的数据拷贝到内核
+    if (copy_from_user(kbuf, buf, len)) {
         kunmap(page_def);
         return -EFAULT;
     }
 
     // 将剩余部分用 0x55 填充
-    memset(buffer_def + len, 0x55, SECTOR_SIZE - len);
-
-    // 取消映射
+    memset(kbuf + len, 0x55, SECTOR_SIZE - len);
     kunmap(page_def);
 
     // 分配 BIO
@@ -158,173 +254,145 @@ static ssize_t bio_rw_write(struct file *file, const char __user *buf, size_t le
         return -ENOMEM;
     }
 
-    bio->bi_bdev  = bdev_def;
-    bio->bi_end_io = bio_end_io;
     bio_set_dev(bio, bdev_def);
+    bio->bi_bdev  = bdev_def;
     bio->bi_opf   = REQ_OP_WRITE;
 
+    // 提交写操作（同步等待完成）
     bio_add_page(bio, page_def, SECTOR_SIZE, 0);
+    submit_bio_sync(bio);
 
-    // 提交写操作
-    submit_bio(bio);
-
+    printk(KERN_INFO "[bio_rw_char_dev] Wrote %zu bytes to default device (sync done)\n", len);
     return len;
 }
 
-// 释放默认设备
+// 关闭时一次性释放两块设备和 page
 static int bio_rw_release(struct inode *inode, struct file *file)
 {
     if (bdev_def) {
         blkdev_put(bdev_def, FMODE_READ | FMODE_WRITE);
         bdev_def = NULL;
     }
+    if (bdev_second) {
+        blkdev_put(bdev_second, FMODE_READ | FMODE_WRITE);
+        bdev_second = NULL;
+    }
     if (page_def) {
         __free_page(page_def);
         page_def = NULL;
     }
-    printk(KERN_INFO "[bio_rw_char_dev] release() -> closed default device\n");
+    if (page_second) {
+        __free_page(page_second);
+        page_second = NULL;
+    }
+
+    printk(KERN_INFO "[bio_rw_char_dev] release() -> closed both devices\n");
     return 0;
 }
 
 //---------------------- 设备2操作：通过 IOCTL 实现 ----------------------//
-//
-// 提供两个新的 ioctl 命令，IOCTL_READ_SECOND 和 IOCTL_WRITE_SECOND，
-// 分别对 SECOND_DEVICE (/dev/nvme0n1p2) 进行读写。
 
-// 函数: read_second_device
-// 从 SECOND_DEVICE 读取一个扇区到用户缓冲区
+// 从第二个设备读 (同步)
 static long read_second_device(unsigned long arg)
 {
-    struct block_device *bdev2;
     struct bio *bio;
-    struct page *page2;
     char *kbuf;
-    long ret = 0;
     size_t len = SECTOR_SIZE;
+    long ret = 0;
 
-    // 打开设备2
-    bdev2 = blkdev_get_by_path(SECOND_DEVICE, FMODE_READ, NULL);
-    if (IS_ERR(bdev2)) {
-        printk(KERN_ERR "[bio_rw_char_dev] Failed to open block device: %s\n", SECOND_DEVICE);
-        return PTR_ERR(bdev2);
+    if (!bdev_second || !page_second) {
+        printk(KERN_ERR "[bio_rw_char_dev] Second device not initialized\n");
+        return -ENODEV;
     }
 
-    // 分配一个 page
-    page2 = alloc_page(GFP_KERNEL);
-    if (!page2) {
-        blkdev_put(bdev2, FMODE_READ);
-        return -ENOMEM;
-    }
-
-    // 构造读取 BIO
+    // 构造读 BIO
     bio = bio_alloc(GFP_KERNEL, 1);
     if (!bio) {
-        __free_page(page2);
-        blkdev_put(bdev2, FMODE_READ);
+        printk(KERN_ERR "[bio_rw_char_dev] Failed to alloc bio\n");
         return -ENOMEM;
     }
 
-    bio->bi_bdev  = bdev2;
-    bio->bi_end_io = bio_end_io;
-    bio_set_dev(bio, bdev2);
+    bio_set_dev(bio, bdev_second);
+    bio->bi_bdev  = bdev_second;
     bio->bi_opf   = REQ_OP_READ;
 
-    bio_add_page(bio, page2, SECTOR_SIZE, 0);
+    bio_add_page(bio, page_second, SECTOR_SIZE, 0);
 
-    submit_bio(bio);
+    // 同步等待读完成
+    submit_bio_sync(bio);
 
-    // 将 page2 映射到内核空间
-    kbuf = kmap(page2);
+    // 读完后，把数据拷到用户空间
+    kbuf = kmap(page_second);
 
-    // 拷贝到用户空间 arg（应该是用户传进来的 buffer）
     if (copy_to_user((char __user *)arg, kbuf, len))
         ret = -EFAULT;
 
-    printk(KERN_INFO "[bio_rw_char_dev] IOCTL read from second device (%s)\n", SECOND_DEVICE);
+    kunmap(page_second);
 
-    kunmap(page2);
-    __free_page(page2);
-    blkdev_put(bdev2, FMODE_READ);
-
+    printk(KERN_INFO "[bio_rw_char_dev] IOCTL read from second device (sync)\n");
     return ret;
 }
 
-// 函数: write_second_device
-// 将用户缓冲区(一个扇区)写入 SECOND_DEVICE
+// 写到第二个设备 (同步)
 static long write_second_device(unsigned long arg)
 {
-    struct block_device *bdev2;
     struct bio *bio;
-    struct page *page2;
     char *kbuf;
-    long ret = 0;
     size_t len = SECTOR_SIZE;
+    long ret = 0;
 
-    // 打开设备2
-    bdev2 = blkdev_get_by_path(SECOND_DEVICE, FMODE_WRITE, NULL);
-    if (IS_ERR(bdev2)) {
-        printk(KERN_ERR "[bio_rw_char_dev] Failed to open block device: %s\n", SECOND_DEVICE);
-        return PTR_ERR(bdev2);
+    if (!bdev_second || !page_second) {
+        printk(KERN_ERR "[bio_rw_char_dev] Second device not initialized\n");
+        return -ENODEV;
     }
 
-    // 分配 page
-    page2 = alloc_page(GFP_KERNEL);
-    if (!page2) {
-        blkdev_put(bdev2, FMODE_WRITE);
-        return -ENOMEM;
-    }
+    // 将用户数据拷贝到 page_second
+    kbuf = kmap(page_second);
 
-    // 映射内核地址
-    kbuf = kmap(page2);
-
-    // 将用户数据拷贝到 kbuf
     if (copy_from_user(kbuf, (char __user *)arg, len)) {
         ret = -EFAULT;
-        goto write_err;
+        goto out_unmap;
     }
+
+    // 仅调试打印前 16 个字节
+    printk(KERN_INFO "[bio_rw_char_dev] buff from userspace (first 16 bytes): ");
+    {
+        int i;
+        for (i = 0; i < 16 && i < len; i++) {
+            printk(KERN_CONT "%02x ", (unsigned char)kbuf[i]);
+        }
+    }
+    printk(KERN_CONT "\n");
 
     // 剩余部分填充 0x55
     memset(kbuf + len, 0x55, SECTOR_SIZE - len);
-    kunmap(page2);
+
+out_unmap:
+    kunmap(page_second);
+    if (ret)
+        return ret;
 
     // 分配 BIO
     bio = bio_alloc(GFP_KERNEL, 1);
     if (!bio) {
-        ret = -ENOMEM;
-        goto write_err2;
+        printk(KERN_ERR "[bio_rw_char_dev] Failed to alloc bio\n");
+        return -ENOMEM;
     }
 
-    bio->bi_bdev  = bdev2;
-    bio->bi_end_io = bio_end_io;
-    bio_set_dev(bio, bdev2);
+    bio_set_dev(bio, bdev_second);
+    bio->bi_bdev  = bdev_second;
     bio->bi_opf   = REQ_OP_WRITE;
 
-    bio_add_page(bio, page2, SECTOR_SIZE, 0);
+    bio_add_page(bio, page_second, SECTOR_SIZE, 0);
 
-    submit_bio(bio);
+    // 同步等待写完成
+    submit_bio_sync(bio);
 
-    printk(KERN_INFO "DEBUG: submit_bio");
-
-    sync_blockdev(bdev2);
-    fsync_bdev(bdev2);
-
-
-    printk(KERN_INFO "[bio_rw_char_dev] IOCTL write to second device (%s)\n", SECOND_DEVICE);
-
-    // 释放资源
-    blkdev_put(bdev2, FMODE_WRITE);
-    __free_page(page2);
-    return ret;
-
-write_err:
-    kunmap(page2);
-write_err2:
-    __free_page(page2);
-    blkdev_put(bdev2, FMODE_WRITE);
+    printk(KERN_INFO "[bio_rw_char_dev] IOCTL write to second device (sync)\n");
     return ret;
 }
 
-// ioctl 操作
+//---------------------- IOCTL 调度 ----------------------//
 static long bio_rw_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
     switch (cmd) {
@@ -401,5 +469,5 @@ module_init(bio_rw_init);
 module_exit(bio_rw_exit);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Your Name");
-MODULE_DESCRIPTION("Character device driver for BIO read/write to two block devices (default + second via ioctl)");
+MODULE_AUTHOR("Example Author");
+MODULE_DESCRIPTION("Synchronous BIO read/write to two block devices with completion wait.");
