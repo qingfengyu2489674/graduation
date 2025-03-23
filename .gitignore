@@ -1,6 +1,7 @@
 *
 !Makefile
 !*.c
+!*.h
 !*.sh
 *.mod.c
 !*/
