@@ -133,7 +133,7 @@ ssize_t readWithCache(int fd, void *buf, size_t count, off_t offset)
         {
             if(cache != NULL)
             {
-                readWithDevCache(hashTableFdNode->devHash, cache, buf + processedData, offsetInCache, DataToProcess);
+                readWithDevCache(fd, hashTableFdNode->devHash, cache, buf + processedData, offsetInCache, DataToProcess);
             }
             else
             {
@@ -182,7 +182,7 @@ ssize_t writeWithCache(int fd, const void *buf, size_t count, off_t offset)
         {
             if(cache != NULL)
             {
-                writeWithDevCache(hashTableFdNode->devHash, cache, buf + processedData, offsetInCache, DataToProcess);
+                writeWithDevCache(fd, hashTableFdNode->devHash, cache, buf + processedData, offsetInCache, DataToProcess);
             }
             else
             {

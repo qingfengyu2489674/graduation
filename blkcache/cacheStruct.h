@@ -14,7 +14,7 @@ typedef struct cache
     bool dirty;
 }cache;
 
-#define CACHE_SIZE 64
+#define CACHE_SIZE 512
 
 void createCache(AVLTreeNode **root, LRUHash *Hash, off_t offset, void *data);
 cache* findCache(AVLTreeNode *root, off_t offset);

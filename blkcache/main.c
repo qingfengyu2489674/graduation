@@ -9,9 +9,19 @@
 
 #include "cacheIOHandler.h"
 
+#define CACHE_TYPE_HOST 0
+#define CACHE_TYPE_DEVICE 1
 
-#define CACHE_SIZE 64
+#define IOCTL_READ_BLOCK  _IOR('b', 2, char*)
+#define IOCTL_WRITE_BLOCK _IOW('b', 3, char*)
 
+#define CACHE_TYPE_MASK ((off_t)1 << (sizeof(off_t)*8 - 1))
+#define GET_CACHE_TYPE(off) (((off) & CACHE_TYPE_MASK) ? 1 : 0)
+#define GET_REAL_OFFSET(off) ((off) & ~CACHE_TYPE_MASK)
+#define SET_CACHE_TYPE(off, type) \
+    ((off) = ((off) & ~CACHE_TYPE_MASK) | ((type) ? CACHE_TYPE_MASK : 0))
+
+#define CACHE_SIZE 512
 
 int openWithCache(const char *pathname, int flags, mode_t mode);
 int closeWithCache(int fd);
@@ -39,7 +49,7 @@ int main()
 
 void* thread_func(void* arg) 
 {
-    int fd = openWithCache("testfile.tmp", O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
+    int fd = openWithCache("/dev/bio_rw_char_dev", O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
     if (fd == -1) 
     {
         perror("Failed to open test file in thread");
@@ -67,6 +77,7 @@ void* thread_func(void* arg)
     char randomReadBuf[CACHE_SIZE] = {0};
     for (off_t offset = 0; offset < sizeof(largeWriteData); offset += CACHE_SIZE / 2) 
     { 
+        SET_CACHE_TYPE(offset, 1);
         ssize_t bytes_read_random = readWithCache(fd, randomReadBuf, CACHE_SIZE / 2, offset);
         if (bytes_read_random < 0) 
         {
