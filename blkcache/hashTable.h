@@ -12,8 +12,9 @@
 typedef struct HashTableFdNode 
 {
     int fd;
-    LRUHash* hash;
-    AVLTreeNode* root;         
+    LRUHash* hostHash;
+    LRUHash* devHash;
+    AVLTreeNode* root;
     struct HashTableFdNode* next;
 } HashTableFdNode;
 
@@ -26,7 +27,7 @@ typedef struct HashTableFd
 
 
 HashTableFd* createHashTableFd(void);
-void createAndInsertFdNode(int fd, LRUHash* hash, AVLTreeNode* root);
+void createAndInsertFdNode(int fd, LRUHash* host_hash, LRUHash* devHash, AVLTreeNode* root);
 HashTableFdNode* findFdNode(int fd);
 int deleteFdNode(int fd);
 int getFdFromHashTable(void);

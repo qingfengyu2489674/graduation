@@ -22,9 +22,8 @@ TARGET = cache
 # 默认目标：编译并生成可执行文件
 .PHONY: all clean
 
+# all 目标，默认执行
 all: $(TARGET)
-	@echo "Compilation finished, cleaning up intermediate files..."
-	$(MAKE) clean
 
 # 链接生成可执行文件，使用 -pthread 选项链接线程库
 $(TARGET): $(OBJS)
@@ -37,3 +36,4 @@ $(TARGET): $(OBJS)
 # 清理编译过程中生成的文件，保留最终的可执行文件
 clean:
 	rm -f $(OBJS)
+	rm -f $(TARGET)

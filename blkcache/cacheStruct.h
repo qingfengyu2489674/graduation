@@ -3,7 +3,6 @@
 
 #include <stdbool.h>
 
-
 #include "AVLTree.h"
 #include "lru.h"
 
@@ -20,7 +19,7 @@ typedef struct cache
 void createCache(AVLTreeNode **root, LRUHash *Hash, off_t offset, void *data);
 cache* findCache(AVLTreeNode *root, off_t offset);
 void deleteTailCache(AVLTreeNode **root, LRUHash *Hash);
-void cleanUpCache(AVLTreeNode *root, LRUHash *Hash);
+void cleanUpCache(AVLTreeNode *root, LRUHash *host_hash, LRUHash *devHash);
 
 void printAVLTreeTraversalResults(AVLTreeNode *root, LRUHash *Hash);
 

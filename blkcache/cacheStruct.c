@@ -28,14 +28,21 @@ void cleanUpAVLTreeData(AVLTreeNode** root)
     }
 }
 
-void cleanUpCache(AVLTreeNode* root, LRUHash* Hash) 
+void cleanUpCache(AVLTreeNode* root, LRUHash* hostHash, LRUHash* devHash) 
 {
     
-    if (Hash != NULL) 
+    if (hostHash != NULL) 
     {
-        freeHash(Hash);
-        Hash = NULL;
+        freeHash(hostHash);
+        hostHash = NULL;
     }
+
+    if (devHash != NULL) 
+    {
+        freeHash(devHash);
+        devHash = NULL;
+    }
+
     if(root != NULL)
     {
         cleanUpAVLTreeData(&root); 

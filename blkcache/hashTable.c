@@ -17,20 +17,20 @@ HashTableFd* createHashTableFd(void)
 }
 
 
-HashTableFdNode* createHashTableFdNode(int fd, LRUHash* hash, AVLTreeNode* root) 
+HashTableFdNode* createHashTableFdNode(int fd, LRUHash* host_hash, LRUHash* devHash, AVLTreeNode* root) 
 {
     HashTableFdNode* node = (HashTableFdNode*)malloc(sizeof(HashTableFdNode));
     node->fd = fd;
-    node->hash = hash;
-    node->root = root;
+    node->hostHash = host_hash;
+    node->devHash = devHash;
     node->next = NULL;
     return node;
 }
 
-void createAndInsertFdNode(int fd, LRUHash* hash, AVLTreeNode* root) 
+void createAndInsertFdNode(int fd, LRUHash* host_hash, LRUHash* devHash, AVLTreeNode* root) 
 {
     int index = HASH_FD(fd, table->size);
-    HashTableFdNode* newNode = createHashTableFdNode(fd, hash, root);
+    HashTableFdNode* newNode = createHashTableFdNode(fd, host_hash, devHash, root);
     
     pthread_mutex_lock(&(table->lock)); 
 
