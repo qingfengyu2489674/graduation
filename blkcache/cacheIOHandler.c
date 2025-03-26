@@ -13,7 +13,7 @@
 
 
 
-int openWithCache(const char *pathname, int flags, mode_t mode)
+int openWithCache(const char *pathname, int flags, mode_t mode ,int cacheType)
 {
     if (pathname == NULL) 
     {
@@ -38,16 +38,8 @@ int openWithCache(const char *pathname, int flags, mode_t mode)
         return -1;
     }
 
-    LRUHash* hostHash = createHash();
-    if (hostHash == NULL) 
-    {
-        fprintf(stderr, "Error: Failed to create LRUHash\n");
-        close(fd);
-        return -1;
-    }
-
-    LRUHash* devHash = createHash();
-    if (devHash == NULL) 
+    LRUHash* Hash = createHash();
+    if (Hash == NULL) 
     {
         fprintf(stderr, "Error: Failed to create LRUHash\n");
         close(fd);
@@ -55,7 +47,7 @@ int openWithCache(const char *pathname, int flags, mode_t mode)
     }
 
     AVLTreeNode* root = NULL;
-    createAndInsertFdNode(fd, hostHash, devHash, root);
+    createAndInsertFdNode(fd, Hash, root, cacheType);
   
     return fd;
 }
@@ -114,11 +106,11 @@ ssize_t readWithCache(int fd, void *buf, size_t count, off_t offset)
         cache* cache = findCache(hashTableFdNode->root, steppedAlignedOffset);
         size_t offsetInCache = (offset > steppedAlignedOffset) ? (offset - steppedAlignedOffset) : 0;
 
-        if(GET_CACHE_TYPE(steppedAlignedOffset) == CACHE_TYPE_HOST)
+        if(hashTableFdNode->cacheType == CACHE_TYPE_HOST)
         {
             if(cache != NULL)
             {
-                readWithHostCache(hashTableFdNode->hostHash, cache, buf + processedData, offsetInCache, DataToProcess);
+                readWithHostCache(hashTableFdNode->Hash, cache, buf + processedData, offsetInCache, DataToProcess);
             }
             else
             {
@@ -133,7 +125,7 @@ ssize_t readWithCache(int fd, void *buf, size_t count, off_t offset)
         {
             if(cache != NULL)
             {
-                readWithDevCache(fd, hashTableFdNode->devHash, cache, buf + processedData, offsetInCache, DataToProcess);
+                readDevWithCache(fd, hashTableFdNode->Hash, cache, buf + processedData, offsetInCache, DataToProcess);
             }
             else
             {
@@ -167,26 +159,26 @@ ssize_t writeWithCache(int fd, const void *buf, size_t count, off_t offset)
         
         cache* cache = findCache(hashTableFdNode->root, steppedAlignedOffset);
 
-        if(GET_CACHE_TYPE(steppedAlignedOffset) == CACHE_TYPE_HOST)
+        if(hashTableFdNode->cacheType == CACHE_TYPE_HOST)
         {
             if(cache != NULL)
             {
-                writeWithHostCache(hashTableFdNode->hostHash, cache, buf + processedData, offsetInCache, DataToProcess);
+                writeHostWithCache(hashTableFdNode->Hash, cache, buf + processedData, offsetInCache, DataToProcess);
             }
             else
             {
-                writeWithoutHostCache(fd, buf + processedData, offsetOutCache, DataToProcess);
+                writeHostWithoutCache(fd, buf + processedData, offsetOutCache, DataToProcess);
             }
         }
         else
         {
             if(cache != NULL)
             {
-                writeWithDevCache(fd, hashTableFdNode->devHash, cache, buf + processedData, offsetInCache, DataToProcess);
+                writeDevWithCache(fd, hashTableFdNode->Hash, cache, buf + processedData, offsetInCache, DataToProcess);
             }
             else
             {
-                writeWithoutDevCache(fd, buf + processedData, offsetOutCache, DataToProcess);
+                writeDevWithoutCache(fd, buf + processedData, offsetOutCache, DataToProcess);
             }
         }
         processedData = processedData + DataToProcess;

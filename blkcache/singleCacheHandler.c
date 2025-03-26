@@ -8,74 +8,77 @@
 
 ssize_t writeBackCache(int fd, cache* cache) 
 {
-    printf("Writebake cache is Offset: %zu\n", cache->offset);   
-    return pwrite(fd, cache->data, CACHE_SIZE, cache->offset);
+    HashTableFdNode* hashTableFdNode = findFdNode(fd);
+    if(hashTableFdNode->cacheType == CACHE_TYPE_HOST)
+    {
+        printf("Writebake host cache is Offset: %zu\n", cache->offset);   
+        return pwrite(fd, cache->data, CACHE_SIZE, cache->offset);
+    }
+    else
+    {
+        printf("Writebake dev cache is Offset: %zu\n", cache->offset); 
+
+        unsigned char* tempBuffer = (unsigned char*)malloc(CACHE_SIZE);
+        if (tempBuffer == NULL) 
+        {
+            perror("malloc failed");
+            return;
+        }
+    
+        int readNumb = pread(fd, tempBuffer, CACHE_SIZE, cache->offset);
+
+        if (readNumb == -1)
+        {
+            fprintf(stderr, "Error reading data from file descriptor %d at offset %lld\n", fd, (long long)cache->offset);
+            return;
+        }
+
+        int ret = lseek(fd, cache->offset, SEEK_SET);
+        if (ret < 0) 
+        {
+            perror("lseek");
+            return;
+        } 
+    
+        ret = ioctl(fd, IOCTL_READ_BLOCK, tempBuffer);
+        if (ret < 0) 
+        {
+            perror("ioctl read second device");
+            return;
+        }
+    }
+
 }
 
-void traversalWriteBackHostCache(AVLTreeNode* root, int fd)
+void traversalWriteBackCache(AVLTreeNode* root, int fd)
 {
     if (root != NULL) 
     {
-        traversalWriteBackHostCache(root->left, fd);
-
+        traversalWriteBackCache(root->left, fd);
         if(((cache*)(root->data))->dirty)
         {
-            //TODO：增加判断逻辑，提供两种写回路径
-
-            if(GET_CACHE_TYPE(((cache*)(root->data))->offset) == CACHE_TYPE_HOST)
+            size_t writeNumb = writeBackCache(fd ,(cache*)(root->data));
+            if (writeNumb == -1)
             {
-                size_t writeNumb = writeBackCache(fd ,(cache*)(root->data));
-                if (writeNumb == -1)
-                {
-                    fprintf(stderr, "Write back failed for node with offset %ld\n", (long)((cache*)(root->data))->offset);
-                }
-                ((cache*)(root->data))->dirty = 0;
+                fprintf(stderr, "Write back failed for node with offset %ld\n", (long)((cache*)(root->data))->offset);
             }
+            ((cache*)(root->data))->dirty = 0;
         }
-        traversalWriteBackHostCache(root->right, fd);
+        traversalWriteBackCache(root->right, fd);
     }
 }
 
-void traversalWriteBackDevCache(AVLTreeNode* root, int fd)
-{
-    if (root != NULL) 
-    {
-        traversalWriteBackDevCache(root->left, fd);
-
-        if(((cache*)(root->data))->dirty)
-        {
-            if(GET_CACHE_TYPE(((cache*)(root->data))->offset) == CACHE_TYPE_DEVICE)
-            {
-                size_t writeNumb = writeBackCache(fd ,(cache*)(root->data));
-                if (writeNumb == -1)
-                {
-                    fprintf(stderr, "Write back failed for node with offset %ld\n", (long)((cache*)(root->data))->offset);
-                }
-                ((cache*)(root->data))->dirty = 0;
-            }
-        }
-        traversalWriteBackDevCache(root->right, fd);
-    }
-}
 
 void checkCacheOverflow(int fd)
 {
     HashTableFdNode* hashTableFdNode = findFdNode(fd);
     AVLTreeNode** root = &(hashTableFdNode->root);
-    LRUHash* hostHash = hashTableFdNode->hostHash;
+    LRUHash* hostHash = hashTableFdNode->Hash;
 
     while(hostHash->size > MAX_CACHE_ENTRIES)
     {
-        traversalWriteBackHostCache(*root ,fd);
+        traversalWriteBackCache(*root ,fd);
         deleteTailCache(root, hostHash);
-    }
-
-    LRUHash* devHash = hashTableFdNode->devHash;
-
-    while(devHash->size > MAX_CACHE_ENTRIES)
-    {
-        traversalWriteBackDevCache(*root ,fd);
-        deleteTailCache(root, devHash);
     }
 }
 
@@ -89,7 +92,7 @@ void readWithoutHostCache(int fd, void* buf, off_t alignedOffset)
 {
     HashTableFdNode* hashTableFdNode = findFdNode(fd);
     AVLTreeNode** root = &(hashTableFdNode->root);
-    LRUHash* Hash = hashTableFdNode->hostHash;
+    LRUHash* Hash = hashTableFdNode->Hash;
 
     int readNumb = pread(fd, buf, CACHE_SIZE, alignedOffset);
 
@@ -104,18 +107,18 @@ void readWithoutHostCache(int fd, void* buf, off_t alignedOffset)
 }
 
 
-void writeWithHostCache(LRUHash* Hash, cache* cache, const void* buf, off_t offsetInCache, size_t count)
+void writeHostWithCache(LRUHash* Hash, cache* cache, const void* buf, off_t offsetInCache, size_t count)
 {
     memcpy((cache->data) + offsetInCache, buf, count);
     cache->dirty = 1;
     moveNodeToHeadByKey(Hash, (long)(cache->offset/CACHE_SIZE));
 }
 
-void writeWithoutHostCache(int fd, const void* buf, off_t offset, size_t count)
+void writeHostWithoutCache(int fd, const void* buf, off_t offset, size_t count)
 {
     HashTableFdNode* hashTableFdNode = findFdNode(fd);
     AVLTreeNode** root = &(hashTableFdNode->root);
-    LRUHash* Hash = hashTableFdNode->hostHash;
+    LRUHash* Hash = hashTableFdNode->Hash;
 
     int writeNumb = pwrite(fd, buf, count, offset);
 
@@ -146,13 +149,12 @@ void writeBackAndCleanUpCache(int fd)
 {
     HashTableFdNode* hashTableFdNode = findFdNode(fd);
 
-    traversalWriteBackHostCache(hashTableFdNode->root ,fd);
-    traversalWriteBackDevCache(hashTableFdNode->root ,fd);
-    cleanUpCache(hashTableFdNode->root, hashTableFdNode->hostHash, hashTableFdNode->devHash);
+    traversalWriteBackCache(hashTableFdNode->root ,fd);
+    cleanUpCache(hashTableFdNode->root, hashTableFdNode->Hash, hashTableFdNode->Hash);
 }
 
 
-void readWithDevCache(int fd, LRUHash* devHash, cache* cache, void* buf, off_t offsetInCache, size_t count)
+void readDevWithCache(int fd, LRUHash* devHash, cache* cache, void* buf, off_t offsetInCache, size_t count)
 {
     size_t cacheSize = CACHE_SIZE;
     
@@ -163,9 +165,7 @@ void readWithDevCache(int fd, LRUHash* devHash, cache* cache, void* buf, off_t o
         return;
     }
 
-    off_t realOffset = GET_REAL_OFFSET(cache->offset);
-
-    ssize_t ret = pread(fd, tempBuffer, cacheSize, realOffset);
+    ssize_t ret = pread(fd, tempBuffer, cacheSize, cache->offset);
     if (ret < 0) 
     {
         perror("pread from blkcache");
@@ -179,13 +179,10 @@ void readWithDevCache(int fd, LRUHash* devHash, cache* cache, void* buf, off_t o
         remainingBytes = cacheSize - offsetInTempBuffer;
     }
 
-    // 从 tempBuffer 复制数据到目标 buf
     memcpy(buf, tempBuffer + offsetInTempBuffer, remainingBytes);
 
-    // 将缓存节点移到哈希表的头部
     moveNodeToHeadByKey(devHash, (long)(cache->offset / CACHE_SIZE));
 
-    // 使用完毕后释放动态分配的缓冲区
     free(tempBuffer);
 }
 
@@ -194,7 +191,7 @@ void readWithoutDevCache(int fd, void* buf, off_t alignedOffset)
 {
     HashTableFdNode* hashTableFdNode = findFdNode(fd);
     AVLTreeNode** root = &(hashTableFdNode->root);
-    LRUHash* devHash = hashTableFdNode->devHash;
+    LRUHash* devHash = hashTableFdNode->Hash;
 
     // int readNumb = pread(fd, buf, CACHE_SIZE, alignedOffset);
     // if (readNumb == -1)
@@ -227,7 +224,7 @@ void readWithoutDevCache(int fd, void* buf, off_t alignedOffset)
     createCache(root, devHash, alignedOffset, buf);
 }
 
-void writeWithDevCache(int fd, LRUHash* devHash, cache* cache, const void* buf, off_t offsetInCache, size_t count)
+void writeDevWithCache(int fd, LRUHash* devHash, cache* cache, const void* buf, off_t offsetInCache, size_t count)
 {
     size_t cacheSize = CACHE_SIZE;
     
@@ -238,9 +235,7 @@ void writeWithDevCache(int fd, LRUHash* devHash, cache* cache, const void* buf, 
         return;
     }
 
-    off_t realOffset = GET_REAL_OFFSET(cache->offset);
-
-    ssize_t ret = pread(fd, tempBuffer, cacheSize, realOffset);
+    ssize_t ret = pread(fd, tempBuffer, cacheSize, cache->offset);
     if (ret < 0) 
     {
         perror("pread from blkcache");
@@ -257,7 +252,7 @@ void writeWithDevCache(int fd, LRUHash* devHash, cache* cache, const void* buf, 
 
     memcpy(tempBuffer + offsetInTempBuffer, buf, remainingBytes);
 
-    ret = pwrite(fd, tempBuffer, CACHE_SIZE, realOffset);
+    ret = pwrite(fd, tempBuffer, CACHE_SIZE, cache->offset);
     if (ret < 0) 
     {
         perror("pwrite from blkcache");
@@ -271,11 +266,12 @@ void writeWithDevCache(int fd, LRUHash* devHash, cache* cache, const void* buf, 
     free(tempBuffer);
 }
 
-void writeWithoutDevCache(int fd, const void* buf, off_t offset, size_t count)
+void writeDevWithoutCache(int fd, const void* buf, off_t offset, size_t count)
 {
     HashTableFdNode* hashTableFdNode = findFdNode(fd);
     AVLTreeNode** root = &(hashTableFdNode->root);
-    LRUHash* devHash = hashTableFdNode->devHash;
+    LRUHash* devHash = hashTableFdNode->Hash;
+
 
     // -----
 
@@ -297,29 +293,34 @@ void writeWithoutDevCache(int fd, const void* buf, off_t offset, size_t count)
         return;
     }
 
-    off_t realOffset = GET_REAL_OFFSET(offset);
+    off_t alignedOffset = ROUND_DOWN_TO_4096(offset);
 
-    ssize_t ret = pread(fd, tempBuffer, cacheSize, realOffset);
+    int ret = lseek(fd, alignedOffset, SEEK_SET);
     if (ret < 0) 
     {
-        perror("pread from blkcache");
-        free(tempBuffer);
-        return;
-    }
-
-    memcpy(tempBuffer + offset, buf, offset);
-
-    ret = pwrite(fd, tempBuffer, CACHE_SIZE, realOffset);
-    if (ret < 0) 
-    {
-        perror("pwrite from blkcache");
-        free(tempBuffer);
+        perror("lseek");
         return;
     } 
 
-    off_t alignedOffset = ROUND_DOWN_TO_4096(offset);
+    ret = ioctl(fd, IOCTL_READ_BLOCK, tempBuffer);
+    if (ret < 0) 
+    {
+        perror("ioctl read second device");
+        return;
+    }
 
-    readWithoutDevCache(fd, tempBuffer, alignedOffset);
+    memcpy(tempBuffer + offset, buf, count);
+
+    // ret = pwrite(fd, tempBuffer, CACHE_SIZE, alignedOffset);
+    // if (ret < 0) 
+    // {
+    //     perror("pwrite from blkcache");
+    //     free(tempBuffer);
+    //     return;
+    // } 
+
+    checkCacheOverflow(fd);
+    createCache(root, devHash, alignedOffset, tempBuffer);
 
     free(tempBuffer);
     

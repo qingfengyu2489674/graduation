@@ -10,7 +10,7 @@
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 
-int openWithCache(const char *pathname, int flags, mode_t mode);
+int openWithCache(const char *pathname, int flags, mode_t mode, int cacheType);
 int closeWithCache(int fd);
 ssize_t readWithCache(int fd, void *buf, size_t count, off_t offset);
 ssize_t writeWithCache(int fd, const void *buf, size_t count, off_t offset);

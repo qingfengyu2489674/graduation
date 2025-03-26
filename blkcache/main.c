@@ -1,145 +1,66 @@
 #include <stdio.h>
-#include <fcntl.h>
 #include <stdlib.h>
-#include <unistd.h>
-#include <sys/types.h>
-#include <sys/stat.h>
 #include <string.h>
-#include <pthread.h>
-
 #include "cacheIOHandler.h"
-
-#define CACHE_TYPE_HOST 0
-#define CACHE_TYPE_DEVICE 1
-
-#define IOCTL_READ_BLOCK  _IOR('b', 2, char*)
-#define IOCTL_WRITE_BLOCK _IOW('b', 3, char*)
+#include "hashTable.h"
 
 #define CACHE_TYPE_MASK ((off_t)1 << (sizeof(off_t)*8 - 1))
-#define GET_CACHE_TYPE(off) (((off) & CACHE_TYPE_MASK) ? 1 : 0)
-#define GET_REAL_OFFSET(off) ((off) & ~CACHE_TYPE_MASK)
 #define SET_CACHE_TYPE(off, type) \
     ((off) = ((off) & ~CACHE_TYPE_MASK) | ((type) ? CACHE_TYPE_MASK : 0))
 
-#define CACHE_SIZE 512
+#define DEVICE_FILE "/dev/bio_rw_char_dev"
+#define DATA_SIZE 512
 
-int openWithCache(const char *pathname, int flags, mode_t mode);
-int closeWithCache(int fd);
-ssize_t readWithCache(int fd, void *buf, size_t count, off_t offset);
-ssize_t writeWithCache(int fd, const void *buf, size_t count, off_t offset);
+int main(void) {
+    // 使用 openWithCache 接口打开设备文件
 
-void* thread_func(void* arg);
-
-
-int main() 
-{
-    pthread_t thread1, thread2;
-
-    pthread_create(&thread1, NULL, thread_func, NULL);
-    pthread_create(&thread2, NULL, thread_func, NULL);
-
-    pthread_join(thread1, NULL);
-    pthread_join(thread2, NULL);
-
-    unlink("testfile.tmp");
-
-    return 0;
-}
-
-
-void* thread_func(void* arg) 
-{
-    int fd = openWithCache("/dev/bio_rw_char_dev", O_RDWR | O_CREAT, S_IRUSR | S_IWUSR);
-    if (fd == -1) 
-    {
-        perror("Failed to open test file in thread");
-        return NULL;
+    int fd = openWithCache(DEVICE_FILE, O_RDWR, 0, CACHE_TYPE_DEVICE);
+    if (fd < 0) {
+        perror("openWithCache error");
+        return EXIT_FAILURE;
     }
+    
+    // 准备写入数据
+    char writeBuf[DATA_SIZE];
+    memset(writeBuf, 'B', sizeof(writeBuf));
+    
+    // 设置写入的 offset，并使用 SET_CACHE_TYPE 将缓存类型设置为 1（device）
+    off_t writeOffset = 0;
+    printf("writeOffset after SET_CACHE_TYPE: 0x%lx\n", (unsigned long)writeOffset);
 
-    printf("===== Thread %ld: Test 1: Large data write to cache =====\n", pthread_self());
-    char largeWriteData[5 * CACHE_SIZE];
-    for (int i = 0; i < sizeof(largeWriteData); i++) 
-    {
-        largeWriteData[i] = 'A' + (i % 26);
-    }
-
-    ssize_t bytes_written_large = writeWithCache(fd, largeWriteData, sizeof(largeWriteData), 0);
-    if (bytes_written_large < 0) 
-    {
-        perror("Error writing large data to cache");
+    
+    // 写入数据
+    ssize_t bytes_written = writeWithCache(fd, writeBuf, sizeof(writeBuf), writeOffset);
+    if (bytes_written < 0) {
+        perror("writeWithCache error");
         closeWithCache(fd);
-        return NULL;
+        return EXIT_FAILURE;
     }
-    printf("Thread %ld wrote %ld bytes of large data to cache.\n", pthread_self(), bytes_written_large);
+    printf("Wrote %ld bytes to device\n", bytes_written);
+    
+    // 准备读取数据的缓冲区
+    char readBuf[DATA_SIZE];
+    memset(readBuf, 0, sizeof(readBuf));
+    
+    // 设置读取的 offset，并使用 SET_CACHE_TYPE 将缓存类型设置为 1（device）
+    off_t readOffset = 0;
+    printf("readOffset after SET_CACHE_TYPE: 0x%lx\n", (unsigned long)readOffset);
 
-
-    printf("===== Thread %ld: Test 2: Random data read from cache =====\n", pthread_self());
-    char randomReadBuf[CACHE_SIZE] = {0};
-    for (off_t offset = 0; offset < sizeof(largeWriteData); offset += CACHE_SIZE / 2) 
-    { 
-        SET_CACHE_TYPE(offset, 1);
-        ssize_t bytes_read_random = readWithCache(fd, randomReadBuf, CACHE_SIZE / 2, offset);
-        if (bytes_read_random < 0) 
-        {
-            perror("Error reading random data from cache");
-            closeWithCache(fd);
-            return NULL;
-        }
-        printf("Thread %ld read data from offset %ld: %.*s\n", pthread_self(), offset, (int)bytes_read_random, randomReadBuf);
-    }
-
-    printf("===== Thread %ld: Test 3: Unaligned data read from cache =====\n", pthread_self());
-    char unalignedReadBuf[CACHE_SIZE] = {0};
-    ssize_t bytes_read_unaligned = readWithCache(fd, unalignedReadBuf, CACHE_SIZE / 2, CACHE_SIZE / 3); 
-    if (bytes_read_unaligned < 0) 
-    {
-        perror("Error reading unaligned data from cache");
+    
+    // 读取数据
+    ssize_t bytes_read = readWithCache(fd, readBuf, sizeof(readBuf), readOffset);
+    if (bytes_read < 0) {
+        perror("readWithCache error");
         closeWithCache(fd);
-        return NULL;
+        return EXIT_FAILURE;
     }
-    printf("Thread %ld read data from unaligned offset: %.*s\n", pthread_self(), (int)bytes_read_unaligned, unalignedReadBuf);
-
-    printf("===== Thread %ld: Test 4: Reading beyond cache size =====\n", pthread_self());
-    char beyondCacheBuf[CACHE_SIZE] = {0};
-    ssize_t bytes_read_beyond_cache = readWithCache(fd, beyondCacheBuf, CACHE_SIZE, sizeof(largeWriteData) + 100); // 超出文件末尾
-    if (bytes_read_beyond_cache < 0) 
-    {
-        perror("Error reading beyond the cache size");
-        closeWithCache(fd);
-        return NULL;
-    } 
-    else if (bytes_read_beyond_cache == 0) 
-    {
-        printf("Thread %ld reached beyond cache size (EOF).\n", pthread_self());
+    printf("Read %ld bytes: %.*s\n", bytes_read, (int)bytes_read, readBuf);
+    
+    // 关闭设备文件并清理缓存
+    if (closeWithCache(fd) < 0) {
+        perror("closeWithCache error");
+        return EXIT_FAILURE;
     }
-
-    printf("===== Thread %ld: Test 5: Overwriting data in cache =====\n", pthread_self());
-    char overwriteData[] = "New data that overwrites existing data.";
-    ssize_t bytes_written_overwrite = writeWithCache(fd, overwriteData, strlen(overwriteData) + 1, CACHE_SIZE / 2); // 在缓存中间覆盖
-    if (bytes_written_overwrite < 0)
-    {
-        perror("Error overwriting data in cache");
-        closeWithCache(fd);
-        return NULL;
-    }
-
-    char afterOverwriteBuf[CACHE_SIZE] = {0};
-    ssize_t bytes_read_after_overwrite = readWithCache(fd, afterOverwriteBuf, CACHE_SIZE, CACHE_SIZE / 2);
-    if (bytes_read_after_overwrite < 0) 
-    {
-        perror("Error reading after overwrite");
-        closeWithCache(fd);
-        return NULL;
-    }
-    printf("Thread %ld read data after overwrite: %.*s\n", pthread_self(), (int)bytes_read_after_overwrite, afterOverwriteBuf);
-
-    printf("===== Thread %ld: Closing the file and cleaning up cache =====\n", pthread_self());
-    if (closeWithCache(fd) < 0) 
-    {
-        perror("Failed to close file");
-        return NULL;
-    }
-    printf("Thread %ld closed the file and cleaned up cache.\n", pthread_self());
-
-    return NULL;
+    
+    return EXIT_SUCCESS;
 }
